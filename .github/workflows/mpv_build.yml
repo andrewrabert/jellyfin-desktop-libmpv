@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mpv_ref:
-        description: 'mpv fork ref (commit/branch/tag). Leave empty to use submodule commit.'
+        description: 'mpv fork ref (commit/branch/tag). Default: libmpv-vulkan-gpu-next'
         required: false
+        default: 'libmpv-vulkan-gpu-next'
         type: string
       create_release:
         description: 'Create GitHub release'
@@ -14,7 +15,6 @@ on:
         type: boolean
   push:
     paths:
-      - 'ignore/jellyfin-desktop-cef/third_party/mpv'
       - '.github/workflows/mpv_build.yml'
       - 'packages/mpv-fork.cmake'
 
@@ -24,6 +24,7 @@ defaults:
 
 env:
   MPV_FORK_REPO: andrewrabert/mpv
+  MPV_DEFAULT_REF: libmpv-vulkan-gpu-next
 
 jobs:
   build_mpv:
@@ -45,27 +46,28 @@ jobs:
           git config --global --add safe.directory $PWD
 
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Clone mpv-winbuild-cmake
+        run: |
+          git clone --depth 1 https://github.com/shinchiro/mpv-winbuild-cmake.git mpv-winbuild-cmake
 
       - name: Determine mpv ref
         id: get_ref
         run: |
-          if [ -n "${{ github.event.inputs.mpv_ref }}" ]; then
-            echo "mpv_ref=${{ github.event.inputs.mpv_ref }}" >> $GITHUB_OUTPUT
-            # Resolve ref to commit
-            mpv_commit=$(git ls-remote https://github.com/$MPV_FORK_REPO.git ${{ github.event.inputs.mpv_ref }} | head -1 | cut -f1)
-            if [ -z "$mpv_commit" ]; then
-              # Might be a commit hash directly
-              mpv_commit="${{ github.event.inputs.mpv_ref }}"
-            fi
-          else
-            # Use submodule commit
-            mpv_commit=$(git -C ignore/jellyfin-desktop-cef submodule status third_party/mpv | awk '{print $1}' | tr -d '+-')
-            echo "mpv_ref=$mpv_commit" >> $GITHUB_OUTPUT
+          mpv_ref="${{ github.event.inputs.mpv_ref }}"
+          if [ -z "$mpv_ref" ]; then
+            mpv_ref="$MPV_DEFAULT_REF"
+          fi
+          echo "mpv_ref=$mpv_ref" >> $GITHUB_OUTPUT
+
+          # Resolve ref to commit hash
+          mpv_commit=$(git ls-remote https://github.com/$MPV_FORK_REPO.git "$mpv_ref" | head -1 | cut -f1)
+          if [ -z "$mpv_commit" ]; then
+            # Might be a commit hash directly
+            mpv_commit="$mpv_ref"
           fi
           echo "mpv_commit=${mpv_commit:0:7}" >> $GITHUB_OUTPUT
-          echo "Using mpv commit: $mpv_commit"
+          echo "Using mpv ref: $mpv_ref -> commit: ${mpv_commit:0:7}"
 
       - name: Load clang_root cache
         uses: actions/cache/restore@v4
@@ -91,10 +93,10 @@ jobs:
       - name: Install custom mpv package
         run: |
           # Copy our custom mpv-fork.cmake to override the default mpv.cmake
-          cp packages/mpv-fork.cmake ignore/mpv-winbuild-cmake/packages/mpv.cmake
+          cp packages/mpv-fork.cmake mpv-winbuild-cmake/packages/mpv.cmake
 
       - name: Configure CMake and download sources
-        working-directory: ignore/mpv-winbuild-cmake
+        working-directory: mpv-winbuild-cmake
         env:
           MPV_REF: ${{ steps.get_ref.outputs.mpv_ref }}
         run: |
