@@ -1,0 +1,228 @@
+name: Build libmpv
+
+on:
+  workflow_dispatch:
+    inputs:
+      mpv_ref:
+        description: 'mpv fork ref (commit/branch/tag). Leave empty to use submodule commit.'
+        required: false
+        type: string
+      create_release:
+        description: 'Create GitHub release'
+        required: false
+        default: true
+        type: boolean
+  push:
+    paths:
+      - 'ignore/jellyfin-desktop-cef/third_party/mpv'
+      - '.github/workflows/mpv_build.yml'
+      - 'packages/mpv-fork.cmake'
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  MPV_FORK_REPO: andrewrabert/mpv
+
+jobs:
+  build_mpv:
+    name: Build libmpv (x86_64)
+    runs-on: ubuntu-latest
+    container:
+      image: docker://ghcr.io/shinchiro/archlinux:latest
+    outputs:
+      mpv_version: ${{ steps.build.outputs.mpv_version }}
+      mpv_commit: ${{ steps.get_ref.outputs.mpv_commit }}
+    steps:
+      - name: Setup git config
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global pull.rebase true
+          git config --global rebase.autoStash true
+          git config --global fetch.prune true
+          git config --global --add safe.directory $PWD
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Determine mpv ref
+        id: get_ref
+        run: |
+          if [ -n "${{ github.event.inputs.mpv_ref }}" ]; then
+            echo "mpv_ref=${{ github.event.inputs.mpv_ref }}" >> $GITHUB_OUTPUT
+            # Resolve ref to commit
+            mpv_commit=$(git ls-remote https://github.com/$MPV_FORK_REPO.git ${{ github.event.inputs.mpv_ref }} | head -1 | cut -f1)
+            if [ -z "$mpv_commit" ]; then
+              # Might be a commit hash directly
+              mpv_commit="${{ github.event.inputs.mpv_ref }}"
+            fi
+          else
+            # Use submodule commit
+            mpv_commit=$(git -C ignore/jellyfin-desktop-cef submodule status third_party/mpv | awk '{print $1}' | tr -d '+-')
+            echo "mpv_ref=$mpv_commit" >> $GITHUB_OUTPUT
+          fi
+          echo "mpv_commit=${mpv_commit:0:7}" >> $GITHUB_OUTPUT
+          echo "Using mpv commit: $mpv_commit"
+
+      - name: Load clang_root cache
+        uses: actions/cache/restore@v4
+        with:
+          path: clang_root
+          key: clang_root-${{ github.run_id }}
+          restore-keys: clang_root
+
+      - name: Load x86_64 toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build_x86_64
+          key: clang-x86_64_toolchain-${{ github.run_id }}
+          restore-keys: clang-x86_64_toolchain
+
+      - name: Load repository cache
+        uses: actions/cache/restore@v4
+        with:
+          path: src_packages
+          key: repository-${{ github.run_id }}
+          restore-keys: repository
+
+      - name: Install custom mpv package
+        run: |
+          # Copy our custom mpv-fork.cmake to override the default mpv.cmake
+          cp packages/mpv-fork.cmake ignore/mpv-winbuild-cmake/packages/mpv.cmake
+
+      - name: Configure CMake and download sources
+        working-directory: ignore/mpv-winbuild-cmake
+        env:
+          MPV_REF: ${{ steps.get_ref.outputs.mpv_ref }}
+        run: |
+          cmake -DTARGET_ARCH=x86_64-w64-mingw32 \
+                -DCOMPILER_TOOLCHAIN=clang \
+                -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/clang_root \
+                -DMINGW_INSTALL_PREFIX=$GITHUB_WORKSPACE/build_x86_64/x86_64-w64-mingw32 \
+                -DSINGLE_SOURCE_LOCATION=$GITHUB_WORKSPACE/src_packages \
+                -DRUSTUP_LOCATION=$GITHUB_WORKSPACE/clang_root/install_rustup \
+                -DENABLE_CCACHE=ON \
+                -DCLANG_PACKAGES_LTO=ON \
+                -DMPV_FORK_REPO=$MPV_FORK_REPO \
+                -DMPV_FORK_REF=$MPV_REF \
+                -G Ninja --fresh -B $GITHUB_WORKSPACE/build_x86_64 -S .
+          ninja -C $GITHUB_WORKSPACE/build_x86_64 download || true
+
+      - name: Build mpv
+        id: build
+        run: |
+          ninja -C build_x86_64 update
+          ninja -C build_x86_64 mpv
+          # Extract version
+          version=$(cat build_x86_64/packages/mpv-prefix/src/mpv-build/version.h 2>/dev/null | grep MPV_VERSION | cut -d'"' -f2 || echo "unknown")
+          echo "mpv_version=$version" >> $GITHUB_OUTPUT
+
+      - name: Package mpv
+        run: |
+          ninja -C build_x86_64 mpv-packaging
+          mkdir -p release
+          mv build_x86_64/mpv*.7z release/
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p build_x86_64_logs
+          cp -fr $(find build_x86_64 -type f -iname "*-*.log" -or -wholename "*/ffbuild/config.log") build_x86_64_logs || true
+          7z a -m0=lzma2 -mx=9 -ms=on logs.7z build_x86_64_logs
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mpv-build-logs
+          path: logs.7z
+          retention-days: 7
+
+      - name: Upload mpv release build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpv-x86_64
+          path: release/mpv-x86_64*
+          retention-days: 30
+
+      - name: Upload mpv debug build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpv-x86_64-debug
+          path: release/mpv-debug-x86_64*
+          retention-days: 30
+
+      - name: Upload libmpv dev files
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmpv-dev-x86_64
+          path: release/mpv-dev-x86_64*
+          retention-days: 30
+
+      - name: Clean build directory
+        if: always()
+        run: |
+          rm -rf build_x86_64/mpv*
+          ninja -C build_x86_64 cargo-clean || true
+
+      - name: Save clang_root cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: clang_root
+          key: clang_root-${{ github.run_id }}
+
+      - name: Save x86_64 toolchain cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: build_x86_64
+          key: clang-x86_64_toolchain-${{ github.run_id }}
+
+      - name: Save repository cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: src_packages
+          key: repository-${{ github.run_id }}
+
+      - name: Save release cache
+        uses: actions/cache/save@v4
+        with:
+          path: release
+          key: release-x86_64-${{ github.run_id }}
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build_mpv
+    if: ${{ github.event.inputs.create_release == 'true' || github.event_name == 'push' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load release cache
+        uses: actions/cache/restore@v4
+        with:
+          path: release
+          key: release-x86_64-${{ github.run_id }}
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MPV_COMMIT: ${{ needs.build_mpv.outputs.mpv_commit }}
+        run: |
+          short_date=$(date "+%Y%m%d")
+          tag_name="libmpv-${short_date}-${MPV_COMMIT}"
+
+          # Create release
+          gh release create "$tag_name" \
+            --title "libmpv $tag_name" \
+            --notes "Built from andrewrabert/mpv @ ${MPV_COMMIT}
+
+          **Workflow run**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            release/*.7z || echo "Release creation failed or already exists"
