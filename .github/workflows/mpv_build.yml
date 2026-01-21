@@ -104,10 +104,13 @@ jobs:
                 -G Ninja --fresh -B $GITHUB_WORKSPACE/build_x86_64 -S .
           ninja -C $GITHUB_WORKSPACE/build_x86_64 download || true
 
+      - name: Build GCC toolchain
+        run: |
+          ninja -C build_x86_64 gcc
+
       - name: Build mpv
         id: build
         run: |
-          ninja -C build_x86_64 update
           ninja -C build_x86_64 mpv
           # Extract version
           version=$(cat build_x86_64/packages/mpv-prefix/src/mpv-build/version.h 2>/dev/null | grep MPV_VERSION | cut -d'"' -f2 || echo "unknown")
