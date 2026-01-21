@@ -69,19 +69,12 @@ jobs:
           echo "mpv_commit=${mpv_commit:0:7}" >> $GITHUB_OUTPUT
           echo "Using mpv ref: $mpv_ref -> commit: ${mpv_commit:0:7}"
 
-      - name: Load clang_root cache
-        uses: actions/cache/restore@v4
-        with:
-          path: clang_root
-          key: clang_root-${{ github.run_id }}
-          restore-keys: clang_root
-
-      - name: Load x86_64 toolchain cache
+      - name: Load build cache
         uses: actions/cache/restore@v4
         with:
           path: build_x86_64
-          key: clang-x86_64_toolchain-${{ github.run_id }}
-          restore-keys: clang-x86_64_toolchain
+          key: gcc-x86_64-${{ github.run_id }}
+          restore-keys: gcc-x86_64
 
       - name: Load repository cache
         uses: actions/cache/restore@v4
@@ -101,13 +94,11 @@ jobs:
           MPV_REF: ${{ steps.get_ref.outputs.mpv_ref }}
         run: |
           cmake -DTARGET_ARCH=x86_64-w64-mingw32 \
-                -DCOMPILER_TOOLCHAIN=clang \
-                -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/clang_root \
+                -DCOMPILER_TOOLCHAIN=gcc \
                 -DMINGW_INSTALL_PREFIX=$GITHUB_WORKSPACE/build_x86_64/x86_64-w64-mingw32 \
                 -DSINGLE_SOURCE_LOCATION=$GITHUB_WORKSPACE/src_packages \
-                -DRUSTUP_LOCATION=$GITHUB_WORKSPACE/clang_root/install_rustup \
+                -DRUSTUP_LOCATION=$GITHUB_WORKSPACE/build_x86_64/rustup \
                 -DENABLE_CCACHE=ON \
-                -DCLANG_PACKAGES_LTO=ON \
                 -DMPV_FORK_REPO=$MPV_FORK_REPO \
                 -DMPV_FORK_REF=$MPV_REF \
                 -G Ninja --fresh -B $GITHUB_WORKSPACE/build_x86_64 -S .
@@ -170,19 +161,12 @@ jobs:
           rm -rf build_x86_64/mpv*
           ninja -C build_x86_64 cargo-clean || true
 
-      - name: Save clang_root cache
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: clang_root
-          key: clang_root-${{ github.run_id }}
-
-      - name: Save x86_64 toolchain cache
+      - name: Save build cache
         uses: actions/cache/save@v4
         if: always()
         with:
           path: build_x86_64
-          key: clang-x86_64_toolchain-${{ github.run_id }}
+          key: gcc-x86_64-${{ github.run_id }}
 
       - name: Save repository cache
         uses: actions/cache/save@v4
